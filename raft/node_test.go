@@ -222,6 +222,58 @@ func TestDisableProposalForwarding(t *testing.T) {
 	}
 }
 
+// TestLazyBcastCommit ensures that empty commit message is not sent out
+// when LazyBcastCommit is true.
+func TestLazyBcastCommit(t *testing.T) {
+	cfg1 := newTestConfig(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	cfg1.LazyBcastCommit = true
+	r1 := newRaft(cfg1)
+	r2 := newTestRaft(2, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	r3 := newTestRaft(3, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	nt := newNetwork(r1, r2, r3)
+
+	// elect r1 as leader
+	nt.send(raftpb.Message{From: 1, To: 1, Type: raftpb.MsgHup})
+
+	// Without bcast commit, followers will not update its commit index immediately.
+	var testEntries = []raftpb.Entry{{Data: []byte("testdata")}}
+	nt.send(raftpb.Message{From: 1, To: 1, Type: raftpb.MsgProp, Entries: testEntries})
+	if r1.raftLog.committed != 2 {
+		t.Fatalf("r1 should committed to 2, but got %d", r1.raftLog.committed)
+	}
+	if r2.raftLog.committed != 1 {
+		t.Fatalf("r2 should committed to 1, but got %d", r2.raftLog.committed)
+	}
+	if r3.raftLog.committed != 1 {
+		t.Fatalf("r3 should committed to 1, but got %d", r3.raftLog.committed)
+	}
+
+	// After bcast heartbeat, followers will be informed the actual commit index.
+	for i := 0; i < r1.heartbeatTimeout; i++ {
+		r1.tick()
+	}
+	nt.send(raftpb.Message{From: 1, To: 1, Type: raftpb.MsgHup})
+	if r2.raftLog.committed != 2 {
+		t.Fatalf("r2 should committed to 2, but got %d", r2.raftLog.committed)
+	}
+	if r3.raftLog.committed != 2 {
+		t.Fatalf("r3 should committed to 2, but got %d", r3.raftLog.committed)
+	}
+
+	// Later proposal should commit former proposal.
+	nt.send(raftpb.Message{From: 1, To: 1, Type: raftpb.MsgProp, Entries: testEntries})
+	nt.send(raftpb.Message{From: 1, To: 1, Type: raftpb.MsgProp, Entries: testEntries})
+	if r1.raftLog.committed != 4 {
+		t.Fatalf("r1 should committed to 4, but got %d", r1.raftLog.committed)
+	}
+	if r2.raftLog.committed != 3 {
+		t.Fatalf("r2 should committed to 3, but got %d", r2.raftLog.committed)
+	}
+	if r3.raftLog.committed != 3 {
+		t.Fatalf("r3 should committed to 3, but got %d", r3.raftLog.committed)
+	}
+}
+
 // TestNodeReadIndexToOldLeader ensures that raftpb.MsgReadIndex to old leader
 // gets forwarded to the new leader and 'send' method does not attach its term.
 func TestNodeReadIndexToOldLeader(t *testing.T) {

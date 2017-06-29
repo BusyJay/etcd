@@ -186,6 +186,11 @@ type Config struct {
 	// logical clock from assigning the timestamp and then forwarding the data
 	// to the leader.
 	DisableProposalForwarding bool
+
+	// Don't broadcast an empty raft entry to notify follower to commit an entry.
+	// This may make follower wait a longer time to apply an entry. This configuration
+	// May affect proposal forwarding and follower read.
+	SkipBcastCommit bool
 }
 
 func (c *Config) validate() error {
@@ -267,6 +272,7 @@ type raft struct {
 	// when raft changes its state to follower or candidate.
 	randomizedElectionTimeout int
 	disableProposalForwarding bool
+	skipBcastCommit           bool
 
 	tick func()
 	step stepFunc
@@ -307,6 +313,7 @@ func newRaft(c *Config) *raft {
 		preVote:                   c.PreVote,
 		readOnly:                  newReadOnly(c.ReadOnlyOption),
 		disableProposalForwarding: c.DisableProposalForwarding,
+		skipBcastCommit:           c.skipBcastCommit,
 	}
 	for _, p := range peers {
 		r.prs[p] = &Progress{Next: 1, ins: newInflights(r.maxInflight)}
@@ -899,7 +906,9 @@ func stepLeader(r *raft, m pb.Message) {
 				}
 
 				if r.maybeCommit() {
-					r.bcastAppend()
+					if !r.skipBcastCommit {
+						r.bcastAppend()
+					}
 				} else if oldPaused {
 					// update() reset the wait state on this node. If we had delayed sending
 					// an update before, send it now.
@@ -1191,7 +1200,7 @@ func (r *raft) removeNode(id uint64) {
 
 	// The quorum size is now smaller, so see if any pending entries can
 	// be committed.
-	if r.maybeCommit() {
+	if r.maybeCommit() && !r.skipBcastCommit {
 		r.bcastAppend()
 	}
 	// If the removed node is the leadTransferee, then abort the leadership transferring.
